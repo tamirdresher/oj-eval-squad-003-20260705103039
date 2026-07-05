@@ -163,7 +163,7 @@ private:
     }
     
 public:
-    ICPCSystem() : started(false), frozen(false), durationTime(0), problemCount(0) {}
+    ICPCSystem() : started(false), durationTime(0), problemCount(0), frozen(false) {}
     
     void addTeam(const string& teamName) {
         if (started) {
@@ -191,6 +191,9 @@ public:
         for (int i = 0; i < problems; i++) {
             problemIds.push_back(string(1, 'A' + i));
         }
+        
+        // Initial ranking is lexicographic order
+        sort(teamOrder.begin(), teamOrder.end());
         
         cout << "[Info]Competition starts.\n";
     }
