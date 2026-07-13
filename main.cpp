@@ -2,6 +2,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
+#include <array>
 #include <algorithm>
 #include <sstream>
 
@@ -42,6 +44,7 @@ struct Team {
     map<string, ProblemStatus> problems;
     int solvedCount;
     int penaltyTime;
+    vector<int> solveTimesDesc;
     
     Team() : solvedCount(0), penaltyTime(0) {}
     Team(const string& n) : name(n), solvedCount(0), penaltyTime(0) {}
@@ -49,28 +52,31 @@ struct Team {
     void calculateStats() {
         solvedCount = 0;
         penaltyTime = 0;
+        solveTimesDesc.clear();
         for (auto& p : problems) {
             if (p.second.solveTime != -1 && !p.second.isFrozen()) {
                 solvedCount++;
                 penaltyTime += 20 * p.second.wrongBeforeFreeze + p.second.solveTime;
+                solveTimesDesc.push_back(p.second.solveTime);
             }
         }
-    }
-    
-    vector<int> getSolveTimes() const {
-        vector<int> times;
-        for (const auto& p : problems) {
-            if (p.second.solveTime != -1 && !p.second.isFrozen()) {
-                times.push_back(p.second.solveTime);
-            }
-        }
-        sort(times.rbegin(), times.rend());
-        return times;
+        sort(solveTimesDesc.rbegin(), solveTimesDesc.rend());
     }
 };
 
 class ICPCSystem {
 private:
+    struct QueryCache {
+        int any = -1;
+        unordered_map<string, int> byProblem;
+        array<int, 4> byStatus;
+        unordered_map<string, array<int, 4>> byProblemStatus;
+
+        QueryCache() {
+            byStatus.fill(-1);
+        }
+    };
+
     map<string, Team> teams;
     vector<string> teamOrder;
     bool started;
@@ -79,6 +85,8 @@ private:
     vector<string> problemIds;
     bool frozen;
     vector<Submission> submissions;
+    unordered_map<string, int> rankIndex;
+    unordered_map<string, QueryCache> queryCache;
     
     bool compareTeams(const string& t1, const string& t2) {
         Team& team1 = teams[t1];
@@ -95,8 +103,8 @@ private:
         }
         
         // Compare solve times
-        vector<int> times1 = team1.getSolveTimes();
-        vector<int> times2 = team2.getSolveTimes();
+        const vector<int>& times1 = team1.solveTimesDesc;
+        const vector<int>& times2 = team2.solveTimesDesc;
         
         int minSize = min(times1.size(), times2.size());
         for (int i = 0; i < minSize; i++) {
@@ -117,6 +125,11 @@ private:
         sort(teamOrder.begin(), teamOrder.end(), [this](const string& a, const string& b) {
             return compareTeams(a, b);
         });
+
+        rankIndex.clear();
+        for (size_t i = 0; i < teamOrder.size(); i++) {
+            rankIndex[teamOrder[i]] = static_cast<int>(i);
+        }
     }
     
     void printScoreboard() {
@@ -161,6 +174,44 @@ private:
         if (s == "Runtime_Error") return RUNTIME_ERROR;
         return TIME_LIMIT_EXCEED;
     }
+
+    int getCachedSubmissionIndex(const string& teamName, const string& problem, const string& status) {
+        auto teamIt = queryCache.find(teamName);
+        if (teamIt == queryCache.end()) return -1;
+        QueryCache& cache = teamIt->second;
+
+        if (problem == "ALL" && status == "ALL") {
+            return cache.any;
+        }
+
+        if (problem == "ALL") {
+            Status st = parseStatus(status);
+            return cache.byStatus[st];
+        }
+
+        if (status == "ALL") {
+            auto it = cache.byProblem.find(problem);
+            return it == cache.byProblem.end() ? -1 : it->second;
+        }
+
+        auto problemIt = cache.byProblemStatus.find(problem);
+        if (problemIt == cache.byProblemStatus.end()) return -1;
+        Status st = parseStatus(status);
+        return problemIt->second[st];
+    }
+
+    void updateSubmissionCache(const Submission& submission, int index) {
+        QueryCache& cache = queryCache[submission.team];
+        cache.any = index;
+        cache.byProblem[submission.problem] = index;
+        cache.byStatus[submission.status] = index;
+        auto& statusByProblem = cache.byProblemStatus[submission.problem];
+        if (statusByProblem[0] == 0 && statusByProblem[1] == 0 &&
+            statusByProblem[2] == 0 && statusByProblem[3] == 0) {
+            statusByProblem.fill(-1);
+        }
+        statusByProblem[submission.status] = index;
+    }
     
 public:
     ICPCSystem() : started(false), durationTime(0), problemCount(0), frozen(false) {}
@@ -194,6 +245,10 @@ public:
         
         // Initial ranking is lexicographic order
         sort(teamOrder.begin(), teamOrder.end());
+        rankIndex.clear();
+        for (size_t i = 0; i < teamOrder.size(); i++) {
+            rankIndex[teamOrder[i]] = static_cast<int>(i);
+        }
         
         cout << "[Info]Competition starts.\n";
     }
@@ -201,6 +256,7 @@ public:
     void submit(const string& problem, const string& team, const string& statusStr, int time) {
         Status status = parseStatus(statusStr);
         submissions.push_back({problem, team, status, time});
+        updateSubmissionCache(submissions.back(), static_cast<int>(submissions.size()) - 1);
         
         Team& t = teams[team];
         ProblemStatus& ps = t.problems[problem];
@@ -341,11 +397,9 @@ public:
         }
         
         int rank = 0;
-        for (size_t i = 0; i < teamOrder.size(); i++) {
-            if (teamOrder[i] == teamName) {
-                rank = i + 1;
-                break;
-            }
+        auto it = rankIndex.find(teamName);
+        if (it != rankIndex.end()) {
+            rank = it->second + 1;
         }
         
         cout << teamName << " NOW AT RANKING " << rank << "\n";
@@ -359,33 +413,19 @@ public:
         
         cout << "[Info]Complete query submission.\n";
         
-        Submission* result = nullptr;
-        for (int i = submissions.size() - 1; i >= 0; i--) {
-            if (submissions[i].team != teamName) continue;
-            if (problem != "ALL" && submissions[i].problem != problem) continue;
-            if (status != "ALL") {
-                string subStatus;
-                if (submissions[i].status == ACCEPTED) subStatus = "Accepted";
-                else if (submissions[i].status == WRONG_ANSWER) subStatus = "Wrong_Answer";
-                else if (submissions[i].status == RUNTIME_ERROR) subStatus = "Runtime_Error";
-                else subStatus = "Time_Limit_Exceed";
-                
-                if (subStatus != status) continue;
-            }
-            result = &submissions[i];
-            break;
-        }
-        
-        if (result == nullptr) {
+        int resultIndex = getCachedSubmissionIndex(teamName, problem, status);
+
+        if (resultIndex < 0) {
             cout << "Cannot find any submission.\n";
         } else {
+            const Submission& result = submissions[resultIndex];
             string statusStr;
-            if (result->status == ACCEPTED) statusStr = "Accepted";
-            else if (result->status == WRONG_ANSWER) statusStr = "Wrong_Answer";
-            else if (result->status == RUNTIME_ERROR) statusStr = "Runtime_Error";
+            if (result.status == ACCEPTED) statusStr = "Accepted";
+            else if (result.status == WRONG_ANSWER) statusStr = "Wrong_Answer";
+            else if (result.status == RUNTIME_ERROR) statusStr = "Runtime_Error";
             else statusStr = "Time_Limit_Exceed";
             
-            cout << result->team << " " << result->problem << " " << statusStr << " " << result->time << "\n";
+            cout << result.team << " " << result.problem << " " << statusStr << " " << result.time << "\n";
         }
     }
     
